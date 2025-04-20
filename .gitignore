@@ -1,0 +1,7 @@
+multi_host_mesh_example
+
+*.o
+*.out
+
+.vscode/
+.DS_Store 
