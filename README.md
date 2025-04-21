@@ -6,6 +6,9 @@
 
 ## Design Philosophy & Rationale
 
+![image](https://github.com/user-attachments/assets/40aba6fa-b170-49ef-91a4-6cff1e4a81ea)
+
+
 This is a simple MPI-based mesh runtime system designed for SPMD (Single Program, Multiple Data) execution across multiple hosts (MPI ranks) cooperatively managing **a single, large logical mesh**. It does **not** currently model multi-mesh scenarios.
 
 The core design principle is to **separate the global, host-symmetric definition of work from the local, host-specific execution.**
