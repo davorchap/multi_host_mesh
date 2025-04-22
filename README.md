@@ -227,6 +227,27 @@ Each Host only DISPATCHES commands to the 32 LOCAL Devices
 
 ```
 
+## Host Coordination Dependency
+
+Any multi-host system requires a mechanism for communication and coordination between the host processes. In the SPMD model proposed here, this is needed for optional validation checks and potentially for future extensions involving host-level barriers or collective operations. In the Single Controller model, it's needed for the Controller to dispatch commands to Executors (e.g., via RPC, ZeroMQ, etc.).
+
+This proof-of-concept currently uses **MPI** for this coordination layer, primarily due to its ubiquity in HPC environments and its straightforward primitives for collective operations (like the ones used in the `--validate` checks).
+
+However, relying strictly on MPI introduces a potentially heavy dependency that might not be desirable or necessary for all users, especially those not running in traditional HPC environments or those only targeting single-host configurations.
+
+Future evolution of this multi-host runtime should consider making the coordination layer more flexible:
+
+*   **Optional MPI:** The requirement for MPI could be gated by a build flag, removing the dependency entirely for users only building/running single-host configurations.
+*   **Abstract Interface:** Define an abstract C++ interface (e.g., `IHostCoordinator`) specifying the necessary coordination primitives (like `barrier`, `allreduce`, `bcast`, potentially basic point-to-point messaging if needed for other models).
+*   **Pluggable Implementations:** The core runtime would use the `IHostCoordinator` interface. We could then provide:
+    *   A default implementation based on MPI (shipped with the package for ease of use).
+    *   Potentially other implementations (e.g., using ZeroMQ, gRPC, or other messaging libraries).
+    *   Allow users (consumers) to provide their own custom implementation if they have specific infrastructure or performance requirements.
+
+This approach allows users to choose the coordination mechanism that best fits their environment while keeping the core runtime logic agnostic to the specific underlying library.
+
+**Note:** For this specific example code (`multi_host_mesh_example.cpp`), MPI is currently required for compilation and execution in multi-host mode (`mpirun -np > 1`).
+
 ## Architecture TODO
 
 *   Define and implement `HostBuffer` across a mesh of hosts (e.g., spanning a 2x2 host configuration).
