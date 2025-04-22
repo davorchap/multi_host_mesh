@@ -122,6 +122,9 @@ int main(int argc, char** argv) {
     MeshBuffer test_buf = dev.allocate(test_shape);
     MeshBuffer output_buf = dev.allocate(test_shape, mesh_shape);
 
+    // WIP: HostBuffer design
+    //  HostBuffer host_buf = dev.allocate_host_buffer<uint64_t>(test_shape, mesh_shape, submesh_shape);
+
     // Create and push the multicast test workload
     // All ranks create identical workloads
     // Pass mesh shape to the test function
