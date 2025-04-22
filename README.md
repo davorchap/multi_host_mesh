@@ -47,6 +47,30 @@ The core design principle is to **separate the global, host-symmetric definition
 
 **Crucially, Determinism is Required:** Both the runtime itself *and* the user's application code (including workload generation functions) **must be deterministic**. This means using deterministic algorithms and data structures (e.g., avoiding hash maps with non-deterministic iteration order if the order affects workload generation). If any host process diverges due to non-determinism, the system's behavior becomes undefined. The `--validate` option can help detect divergence after it occurs, but it cannot prevent it; determinism is the fundamental requirement for correctness and run-to-run reproducibility.
 
+### Determinism Considerations for Python Bindings
+
+When using this runtime (especially in the SPMD model) via Python bindings (e.g., pybind11), additional care must be taken regarding determinism:
+
+1.  **Python Garbage Collection (GC) and Resource Deallocation:**
+    *   **Problem:** Standard Python GC timing is non-deterministic across different processes (ranks). If C++ resource deallocation (like freeing a `MeshBuffer`) directly modifies allocator state (which is necessary for correct subsequent allocations) and is tied *only* to the Python object's destruction (e.g., via `__del__`), this critical state change will occur at different times on different ranks, leading to divergence.
+    *   **Solution:** The C++ resource lifetime management **must be decoupled** from Python's GC timing. The Python bindings **must provide explicit, deterministic mechanisms** for resource deallocation.
+    *   **Recommendation:** Users **must** use these explicit mechanisms. The strongly recommended approach is to use **context managers (`with` statement)** for resources like `MeshBuffer`. This ensures deallocation happens deterministically upon exiting the `with` block scope, synchronized across all ranks.
+        ```python
+        # Example of deterministic deallocation with context manager
+        with device.allocate_buffer(...) as buf:
+            # ... use buf ...
+        # <-- buf is deterministically deallocated here on all ranks
+        ```
+    *   An alternative might be an explicit `buffer.free()` method, but it must be called at the exact same logical point in the code by all ranks.
+
+2.  **Python Hash Randomization:**
+    *   **Problem:** Since Python 3.3, dictionary and set iteration order is randomized by default across different process invocations. If user logic iterates over these collections and the order affects workload generation (e.g., determines the order of operations), the generated `MeshWorkload` will differ between ranks, breaking the SPMD model.
+    *   **Recommendation:** User code **must not** rely on unordered collection iteration if it impacts workload definition. Either use ordered collections (e.g., `collections.OrderedDict`, lists) or ensure the logic is insensitive to iteration order. Alternatively, setting the `PYTHONHASHSEED=0` environment variable for all ranks can enforce deterministic iteration, but makes the application reliant on this external setting.
+
+3.  **Other Sources:** Standard pitfalls like rank-dependent branching logic that affects workload definition, uncoordinated I/O, or multi-threading races within a rank's definition phase must also be avoided.
+
+The runtime's validation layer (`--validate on`) can help *detect* divergence caused by these issues but cannot prevent them. Careful deterministic programming is essential when using Python with this SPMD runtime.
+
 **Layered Architecture per Host:** The separation between global definition and local execution can be visualized as a layered stack on each host process:
 
 ```
