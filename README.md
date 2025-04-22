@@ -4,6 +4,24 @@
 
 **Goal:** The primary motivation is to explore how concepts similar to those in TT-Metalium (like `MeshDevice`, `MeshWorkload`, `MeshBuffer`), which are natively multi-device aware, can be extended to become natively **multi-host** aware. This involves managing a single logical mesh distributed across multiple hosts using MPI (or a similar mechanism) primarily for inter-host coordination. Implicit in this "single logical mesh" concept is the assumption of a unified underlying fabric that spans all devices within the mesh, allowing direct device-to-device communication.
 
+## Table of Contents
+
+- [Design Philosophy & Rationale](#design-philosophy--rationale)
+- [Comparison with Other Architectures](#comparison-with-other-architectures)
+  - [1. Single-Host, Single-Device](#1-single-host-single-device)
+  - [2. Single-Host, Multi-Device (e.g., Galaxy)](#2-single-host-multi-device-eg-galaxy)
+  - [3. Multi-Host, Multi-Device (Single Controller, Multiple Executors)](#3-multi-host-multi-device-single-controller-multiple-executors)
+  - [Visualization (4-Host Example: 16x8 Mesh / 8x4 Sub-Meshes)](#visualization-4-host-example-16x8-mesh--8x4-sub-meshes)
+- [Host Coordination Dependency](#host-coordination-dependency)
+- [Architecture TODO](#architecture-todo)
+- [Dependencies](#dependencies)
+- [Components](#components)
+- [Compile](#compile)
+- [Run](#run)
+  - [Command-Line Arguments](#command-line-arguments)
+  - [Validation](#validation)
+  - [Debug Printing](#debug-printing)
+
 ## Design Philosophy & Rationale
 
 ![image](https://github.com/user-attachments/assets/40aba6fa-b170-49ef-91a4-6cff1e4a81ea)
