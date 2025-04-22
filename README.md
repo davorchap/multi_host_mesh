@@ -2,11 +2,39 @@
 
 **Disclaimer:** This is a simplified proof-of-concept and mock-up runtime system. It demonstrates core concepts like SPMD execution, global workload definition vs. local dispatch, and host-based mesh partitioning. It is **not** intended for production use and lacks many features of a real hardware runtime (e.g., actual device communication, complex memory management, robust error handling).
 
-**Goal:** The primary motivation is to explore how concepts similar to those in TT-Metalium (like `MeshDevice`, `MeshWorkload`, `MeshBuffer`), which are natively multi-device aware, can be extended to become natively **multi-host** aware. This involves managing a single logical mesh distributed across multiple hosts using MPI (or a similar mechanism) primarily for inter-host coordination. Implicit in this "single logical mesh" concept is the assumption of a unified underlying fabric that spans all devices within the mesh, allowing direct device-to-device communication.
+**Goal and Scope:**
+
+The primary motivation of this proposal is to explore how concepts similar to those in TT-Metalium (like `MeshDevice`, `MeshWorkload`, `MeshBuffer`), which are natively multi-device aware, can be extended to become natively **multi-host** aware for **Single Program, Multiple Data (SPMD)** execution models.
+
+**The specific focus of this document is:**
+
+*   Managing a **single, large, uniform logical 2D/3D mesh** (potentially a torus) distributed across a potentially large number of hosts.
+*   Presenting this distributed system to the user as a **single global view** for both the underlying TT-fabric connectivity and for workload definition (`MeshWorkload`, `MeshBuffer`).
+*   **Abstracting away the multi-host implementation details** (like mesh partitioning and process coordination) from the user's application code, which interacts primarily with the global mesh interface.
+*   Targeting workloads amenable to SPMD execution, particularly those leveraging **Tensor Parallelism (TP)** and **Data Parallelism (DP)** across the mesh.
+*   Providing a clear path to **scale up** these TP/DP workloads from single-host systems (e.g., an 8x4 mesh on one Galaxy host) to large multi-host configurations (e.g., spanning 16 Galaxies or more), enabling models like Llama to scale from ~70B to 2T+ parameters and sequence lengths to 10M tokens primarily via TP, for which the uniform mesh design and SPMD execution model is a great fit.
+
+**Out of Scope for this Document:**
+
+*   **Multi-Mesh Scenarios:** Managing multiple distinct logical meshes is not covered here.
+*   **MPMD Execution Models:** Multiple Program, Multiple Data execution, where different ranks might run different host programs, is not addressed by this SPMD design.
+*   **Pipeline/Model Parallelism:** Workloads requiring more complex graph-level parallelism (like pipeline parallelism or general model parallelism) often necessitate MPMD execution models and potentially multi-mesh capabilities. These topics will be handled in a separate proposal/document.
+
+In essence, this work explores extending the single-host, multi-device programming model to multi-host for SPMD workloads, maintaining a unified global view of the mesh and fabric while hiding the distribution complexity.
 
 ## Table of Contents
 
 - [Design Philosophy & Rationale](#design-philosophy--rationale)
+  - [Core Principle: Global Definition vs. Local Execution](#core-principle-global-definition-vs-local-execution)
+  - [SPMD Execution Model](#spmd-execution-model)
+  - [Coordination vs. Data Movement](#coordination-vs-data-movement)
+  - [Global View and Local Ownership](#global-view-and-local-ownership)
+  - [Underlying Fabric Assumption](#underlying-fabric-assumption)
+  - [Determinism and Validation](#determinism-and-validation)
+  - [Control Plane (Conceptual)](#control-plane-conceptual)
+  - [Determinism Considerations for Python Bindings](#determinism-considerations-for-python-bindings)
+  - [Layered Architecture per Host](#layered-architecture-per-host)
+  - [Single-Rank Debugging](#single-rank-debugging)
 - [Comparison with Other Architectures](#comparison-with-other-architectures)
   - [1. Single-Host, Single-Device](#1-single-host-single-device)
   - [2. Single-Host, Multi-Device (e.g., Galaxy)](#2-single-host-multi-device-eg-galaxy)
@@ -26,26 +54,43 @@
 
 ![image](https://github.com/user-attachments/assets/40aba6fa-b170-49ef-91a4-6cff1e4a81ea)
 
+### Core Principle: Global Definition vs. Local Execution
 
-This is a simple MPI-based mesh runtime system designed for SPMD (Single Program, Multiple Data) execution. Crucially, this means the user's application itself runs as multiple processes (one MPI rank per host), a shift from typical single-process host applications. MPI (or a similar mechanism) is used here primarily for host-to-host coordination to maintain the SPMD lockstep behavior during workload definition and for optional validation checks. It is **not** intended for bulk data movement between host processes or between hosts and devices. All substantial data movement, including device-to-device transfers and collective communications across the logical mesh, is assumed to occur over the underlying TT-fabric. These processes cooperatively manage **a single, large logical mesh** distributed across the hosts. It does **not** currently model multi-mesh scenarios (Scenarios involving multiple distinct logical meshes, even if potentially residing on the same underlying fabric, are outside the current scope).
+The core design principle is to **separate the global, host-symmetric definition of work from the local, host-specific execution.** All participating host processes first agree on *what* needs to be done across the entire logical mesh before each host determines *how* to execute its portion of that work on the devices it locally manages.
 
-The core design principle is to **separate the global, host-symmetric definition of work from the local, host-specific execution.**
+### SPMD Execution Model
 
-*   **Global View (All Hosts):**
-    *   Users interact with a virtual `MeshDevice` representing the entire logical mesh.
-    *   `MeshBuffer` allocation and `MeshWorkload` creation are performed identically and deterministically across all participating hosts/processes.
-    *   This ensures every host process has a consistent, global view of the resources and the intended computation, simplifying workload design and debugging.
-*   **Local Ownership (Per Host):**
-    *   Each host process (rank) physically manages a specific sub-mesh region of the overall logical mesh.
-    *   Internally, the `MeshDevice` on a given host owns and manages a collection of `Device` objects representing the mesh nodes within its assigned sub-mesh.
-    *   Each local `Device` has its own `DeviceCQ` (Device Command Queue).
-*   **Underlying Fabric Assumption:** This design assumes that the devices comprising the single logical mesh are connected via a single, unified fabric. Direct device-to-device communication within the mesh occurs over this fabric without host intervention.
-*   **SPMD & Lockstep Behavior:** The requirement for identical, deterministic creation of the global view (`MeshBuffer`, `MeshWorkload`) across hosts/processes enforces an SPMD model. All host processes proceed in logical lockstep during the definition phase.
-*   **Optional Validation:** To aid debugging and explicitly verify this lockstep behavior, the runtime includes a validation mechanism (`--validate on`, default). This uses MPI collectives to assert that key operations are indeed identical across all ranks. Disable (`--validate off`) for performance.
-*   **Local Dispatch Abstraction:** The host-local `MeshCQ` serves as the interface for submitting the globally defined `MeshWorkload`. Internally (`MeshCQ::push`), it dispatches the relevant commands from the global workload to the appropriate local `DeviceCQ`s managed by that host process. The subsequent `MeshDevice::dispatch_pending` call processes these local `DeviceCQ`s, notionally interacting with the hardware resources associated with those local mesh devices.
-*   **Control Plane (Conceptual):** While not fully implemented here, the conceptual model aligns with a control plane (likely running alongside the user process on a designated host, e.g., rank 0) having a global view of the entire mesh topology (potentially provided by the user via a mesh description). This central control plane would generate necessary configurations (like routing tables), but delegate the task of applying these configurations to the specific host processes directly managing the target devices.
+This runtime uses a Single Program, Multiple Data (SPMD) execution model. Crucially, this means the user's application itself runs as **multiple processes** (typically one MPI rank per host), a shift from typical single-process host applications. These processes execute the same program code.
 
-**Crucially, Determinism is Required:** Both the runtime itself *and* the user's application code (including workload generation functions) **must be deterministic**. This means using deterministic algorithms and data structures (e.g., avoiding hash maps with non-deterministic iteration order if the order affects workload generation). If any host process diverges due to non-determinism, the system's behavior becomes undefined. The `--validate` option can help detect divergence after it occurs, but it cannot prevent it; determinism is the fundamental requirement for correctness and run-to-run reproducibility.
+This model requires **lockstep behavior** during the workload definition phase: the sequence of operations defining the global view (like `MeshBuffer` allocation and `MeshWorkload` creation) must be identical across all participating processes.
+
+### Coordination vs. Data Movement
+
+A host-to-host coordination mechanism is needed to maintain the SPMD lockstep and perform optional validation checks. This proof-of-concept uses **MPI** for this coordination layer.
+
+It is critical to understand that this coordination layer (MPI) is **not** intended for bulk data movement between host processes or between hosts and devices. All substantial data movement, including device-to-device transfers and collective communications across the logical mesh, is assumed to occur over the **underlying TT-fabric**.
+
+### Global View and Local Ownership
+
+*   **Global View (All Processes):** Users interact with a virtual `MeshDevice` representing the entire logical mesh. `MeshBuffer` allocation and `MeshWorkload` creation are performed identically and deterministically across all participating processes. This ensures every process has a consistent, global view of the resources and the intended computation, simplifying workload design and debugging.
+*   **Local Ownership (Per Process):** Each host process (rank) physically manages a specific sub-mesh region of the overall logical mesh. Internally, the `MeshDevice` on a given host owns and manages a collection of `Device` objects representing the mesh nodes within its assigned sub-mesh. Each local `Device` has its own `DeviceCQ` (Device Command Queue).
+*   **Local Dispatch Abstraction:** The host-local `MeshCQ` serves as the interface for submitting the globally defined `MeshWorkload`. Internally (`MeshCQ::push`), it filters and dispatches the relevant commands from the global workload to the appropriate local `DeviceCQ`s managed by that host process. The subsequent `MeshDevice::dispatch_pending` call processes these local `DeviceCQ`s, notionally interacting with the hardware resources associated with those local mesh devices.
+
+### Underlying Fabric Assumption
+
+This design assumes that the devices comprising the single logical mesh are connected via a **single, unified fabric**. Direct device-to-device communication within the mesh occurs over this fabric without host intervention.
+
+### Determinism and Validation
+
+**Crucially, Determinism is Required:** As mandated by the SPMD model for the definition phase, both the runtime itself *and* the user's application code (including workload generation functions) **must be deterministic**. This means using deterministic algorithms and data structures (e.g., avoiding hash maps with non-deterministic iteration order if the order affects workload generation). If any host process diverges due to non-determinism, the system's behavior becomes undefined.
+
+*(See also: [Determinism Considerations for Python Bindings](#determinism-considerations-for-python-bindings))*.
+
+**Optional Validation:** To aid debugging and explicitly verify the required lockstep behavior, the runtime includes a validation mechanism (`--validate on`, default). This uses MPI collectives (via the coordination layer) to assert that key definition operations (like `MeshWorkload` contents) are indeed identical across all ranks. Disable (`--validate off`) for performance, but be aware that this removes a key check for divergence.
+
+### Control Plane (Conceptual)
+
+While not fully implemented here, the conceptual model aligns with a control plane (likely running alongside the user process on a designated host, e.g., rank 0) having a global view of the entire mesh topology (potentially provided by the user via a mesh description). This central control plane would generate necessary configurations (like routing tables), but delegate the task of applying these configurations to the specific host processes directly managing the target devices.
 
 ### Determinism Considerations for Python Bindings
 
@@ -197,7 +242,7 @@ This is a common alternative approach to managing multi-host systems:
 ```
 
 *   **Potential Pros:**
-    *   **Avoids User Code Divergence:** A major advantage. Since user application logic runs only on the Controller, the risk of divergence between hosts due to non-deterministic user code (e.g., unordered map iteration impacting command generation) or bugs in rank-specific logic is eliminated. This contrasts with the SPMD model's strict requirement for deterministic user code on all ranks.
+    *   **Avoids User Code Divergence:** A major advantage. Since user application logic runs only on the Controller, the risk of divergence between hosts due to non-deterministic user code (e.g., unordered map iteration impacting command generation) is eliminated. This contrasts with the SPMD model's strict requirement for deterministic user code on all ranks.
     *   **Familiar User Model:** User code remains single-process, which might be simpler for developers accustomed to single-host programming paradigms.
     *   **Centralized Host State:** If complex host-side global state needs to be managed or calculated *during* workload generation, doing so in a single Controller process can be simpler than coordinating it across multiple SPMD processes.
 *   **Potential Cons:**
