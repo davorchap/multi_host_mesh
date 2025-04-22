@@ -97,6 +97,11 @@ Each Host only DISPATCHES commands to the 32 LOCAL Devices
 
 ```
 
+## Architecture TODO
+
+*   Define and implement `HostBuffer` across a mesh of hosts (e.g., spanning a 2x2 host configuration).
+*   Explore how host-side functions (like tilize, padding, data transformations) operating on `HostBuffer`s fit into the programming model, potentially integrating with or mirroring concepts from TT-Metalium's host API layer.
+
 ## Dependencies
 
 *   **MPI Implementation:** An MPI library is required (e.g., Open MPI, MPICH, Intel MPI). The `mpic++` compiler wrapper and `mpirun` command must be available in your PATH.
