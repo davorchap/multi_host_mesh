@@ -25,6 +25,42 @@ The core design principle is to **separate the global, host-symmetric definition
 *   **Optional Validation:** To aid debugging and explicitly verify this lockstep behavior, the runtime includes a validation mechanism (`--validate on`, default). This uses MPI collectives to assert that key operations are indeed identical across all ranks. Disable (`--validate off`) for performance.
 *   **Local Dispatch Abstraction:** The host-local `MeshCQ` serves as the interface for submitting the globally defined `MeshWorkload`. Internally (`MeshCQ::push`), it dispatches the relevant commands from the global workload to the appropriate local `DeviceCQ`s managed by that host. The subsequent `MeshDevice::dispatch_pending` call processes these local `DeviceCQ`s, notionally interacting with the hardware resources associated with those local mesh devices.
 
+**Crucially, Determinism is Required:** Both the runtime itself *and* the user's application code (including workload generation functions) **must be deterministic**. This means using deterministic algorithms and data structures (e.g., avoiding hash maps with non-deterministic iteration order if the order affects workload generation). If any host diverges due to non-determinism, the system's behavior becomes undefined. The `--validate` option can help *detect* divergence after it occurs, but it cannot prevent it; determinism is the fundamental requirement for correctness and run-to-run reproducibility.
+
+**Layered Architecture per Host:** The separation between global definition and local execution can be visualized as a layered stack on each host:
+
+```
++----------------------------------------------------+
+|          Global View (Identical on all Hosts)      |
+|----------------------------------------------------|
+| - MeshDevice (Full Logical Mesh)                   |
+| - MeshBuffer (Global Resource Spec)                |
+| - MeshWorkload (Global Computation Spec)           |
++----------------------- | --------------------------+
+                         |
+                         | Submission Interface
+                         V
++----------------------- - --------------------------+
+|                  MeshCQ (Global Input)             |
+|----------------------------------------------------|
+|          Local Dispatch Logic (Host-Specific)      |
+|            (Maps Global Work to Local CQs)         |
+|----------------------- | --------------------------+
+                         |
+                         V Local CQs
++----------------------- - --------------------------+
+|          Local View (Host-Specific Subset)         |
+|----------------------------------------------------|
+| - Set of local Device objects                      |
+| - Associated local DeviceCQ per Device             |
+| - MeshDevice::dispatch_pending() processes these   |
++----------------------------------------------------+
+```
+
+This architecture ensures that all hosts agree on the *what* (the global `MeshWorkload` submitted to `MeshCQ`) before diverging into the *how* (the host-specific dispatch to local `DeviceCQ`s).
+
+**Single-Rank Debugging:** A significant advantage of this design is that because the user's application code interacts primarily with the global view objects (`MeshDevice`, `MeshBuffer`, `MeshWorkload`) and this view is identical across all ranks up to the `MeshCQ` submission point, much of the application logic can often be debugged effectively by running with a single rank (`mpirun -np 1 ...`). This drastically simplifies the debugging process, especially for systems with a large number of hosts.
+
 In essence, the user defines *what* computation should happen on the *entire mesh* (global view), and the runtime handles *how* to distribute and execute that computation on the *local devices* managed by each host.
 
 ### Visualization (4-Host Example: 16x8 Mesh / 8x4 Sub-Meshes)
