@@ -65,6 +65,44 @@ This architecture ensures that all host processes agree on the *what* (the globa
 
 In essence, the user defines *what* computation should happen on the *entire mesh* (global view), and the runtime handles *how* to distribute and execute that computation on the *local devices* managed by each host process.
 
+## Comparison with Other Architectures
+
+To better understand the proposed design (SPMD / Multiple Lockstep Controllers), it's helpful to contrast it with other common system architectures:
+
+### 1. Single-Host, Single-Device
+
+*   **Execution:** User code runs as a single process.
+*   **Scope:** `MeshDevice` represents a 1x1 mesh. The `MeshCQ` maps directly (1:1) to the single underlying `DeviceCQ`.
+*   **Relevance:** Simplest baseline, not applicable to multi-device or multi-host scenarios.
+
+### 2. Single-Host, Multi-Device (e.g., Galaxy)
+
+*   **Execution:** User code runs as a single process.
+*   **Scope:** `MeshDevice` represents the multi-device mesh (e.g., 8x4). `MeshBuffer` and `MeshWorkload` are defined globally for this mesh.
+*   **Dispatch:** The single `MeshCQ` receives the global workload and internally dispatches relevant commands to the multiple `DeviceCQ`s corresponding to the devices managed by the host. This dispatch might be multi-threaded for efficiency.
+*   **Relevance:** Represents the current standard for multi-device systems *within* a single host. The proposed multi-host design leverages similar concepts for the *local* dispatch part on each host.
+
+### 3. Multi-Host, Multi-Device (Single Controller, Multiple Executors)
+
+This is a common alternative approach to managing multi-host systems:
+
+*   **Execution:** User code runs as a **single process** on a designated controller host (or potentially a separate dedicated host).
+*   **Scope:** The Controller process holds the global view (`MeshDevice`, `MeshWorkload`).
+*   **Dispatch:** The Controller process serializes commands derived from the `MeshWorkload` and sends them over the network (e.g., using RPC or a message queue) to Executor processes running on the other hosts. Each Executor process manages its local sub-mesh devices and has a form of "Remote Mesh CQ" that receives and executes commands from the Controller.
+*   **Key Contrast:** Unlike the proposed SPMD model where *every* host process runs the *same* user code up to the `MeshCQ` submission, here only the Controller runs the main user logic. Executors are passive receivers of commands.
+
+*   **Potential Pros:**
+    *   **Avoids User Code Divergence:** A major advantage. Since user application logic runs only on the Controller, the risk of divergence between hosts due to non-deterministic user code (e.g., unordered map iteration impacting command generation) or bugs in rank-specific logic is eliminated. This contrasts with the SPMD model's strict requirement for deterministic user code on all ranks.
+    *   **Familiar User Model:** User code remains single-process, which might be simpler for developers accustomed to single-host programming paradigms.
+    *   **Centralized Host State:** If complex host-side global state needs to be managed or calculated *during* workload generation, doing so in a single Controller process can be simpler than coordinating it across multiple SPMD processes.
+*   **Potential Cons:**
+    *   **Serialization Overhead:** Requires defining, maintaining, and executing serialization/deserialization protocols for commands sent between Controller and Executors, adding complexity and potential performance cost.
+    *   **Controller Bottleneck:** The single Controller's computation and network dispatch capabilities can become a performance bottleneck, limiting throughput and scalability, especially with many hosts or high-frequency command submission.
+    *   **Executor Complexity:** Requires implementing non-trivial Executor processes capable of receiving, deserializing, and executing commands, plus managing local resources.
+    *   **Debugging Distributed System:** Debugging involves understanding and potentially coordinating logs/state across the Controller, the network communication layer, and multiple Executor processes, presenting different challenges than debugging SPMD divergence.
+
+In summary, the Single Controller model offers robustness against user-code-induced host divergence and presents a familiar single-process programming model, but potentially at the cost of serialization overhead, controller bottlenecks, and the complexity of building and debugging the distributed Controller/Executor system. The proposed SPMD / "Multiple Lockstep Controllers" design trades the determinism burden on user code for potentially better scalability (avoiding the controller bottleneck) and reduced serialization overhead by replicating the workload definition phase across hosts.
+
 ### Visualization (4-Host Example: 16x8 Mesh / 8x4 Sub-Meshes)
 
 Imagine a 16x8 logical mesh divided among 4 hosts (ranks 0-3), where each host manages an 8x4 sub-mesh:
