@@ -1,5 +1,6 @@
 #include "multi_host_mesh_runtime.hpp"
 #include <cstdlib>
+#include <stdexcept>
 using namespace mesh;
 
 void usage(const char* prog) {
